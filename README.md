@@ -65,6 +65,10 @@ The application then loads Kronos from that local directory.
 
 The launcher starts the local server, waits until the dashboard API is ready, and opens the dashboard in Google Chrome.
 
+## Local profiles
+
+The dashboard uses a passwordless local/demo profile to keep preferences and saved forecast data separate on this computer. This identifies a local profile but does not verify a real-world identity. The server is loopback-only; no production authentication provider is configured. See [docs/local_auth.md](docs/local_auth.md) for the storage and security boundary.
+
 ## Project structure
 
 - `src/` — Kronos forecasting and configuration

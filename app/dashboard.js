@@ -23,6 +23,8 @@
     searchTimer: null,
     activeSearchIndex: -1,
     chartMode: 'candles',
+    profile: null,
+    authFirstRun: false,
   };
 
   const elements = {};
@@ -33,6 +35,11 @@
       'source-live', 'source-csv', 'mode-live', 'mode-validation', 'exchange-control', 'exchange-nse', 'exchange-bse',
       'horizon-24', 'horizon-75', 'horizon-120', 'local-note',
       'theme-light', 'theme-dark', 'theme-status',
+      'auth-screen', 'auth-title', 'auth-form', 'auth-name-label', 'auth-name', 'auth-email', 'auth-error', 'auth-submit',
+      'dashboard-view', 'account-controls', 'account-name', 'profile-open', 'sign-out-button',
+      'profile-dialog', 'profile-form', 'profile-close', 'profile-cancel', 'profile-name', 'profile-email',
+      'profile-exchange', 'profile-chart-mode', 'profile-currency', 'profile-horizon', 'profile-mode',
+      'profile-volume', 'profile-error',
       'live-form', 'csv-form', 'ticker-input', 'csv-input', 'live-forecast-button',
       'symbol-search-spinner', 'symbol-search-list', 'selected-symbol-help',
       'csv-forecast-button', 'quick-tickers', 'request-status', 'request-status-text',
@@ -72,7 +79,7 @@
   function setTheme(theme, manual = false) {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#111315' : '#f4f5f7');
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#151b1c' : '#f5f6f5');
     elements['theme-light']?.setAttribute('aria-pressed', String(theme === 'light'));
     elements['theme-dark']?.setAttribute('aria-pressed', String(theme === 'dark'));
     if (elements['theme-status']) elements['theme-status'].textContent = `${theme === 'dark' ? 'Dark' : 'Light'} appearance`;
@@ -116,7 +123,8 @@
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(numeric);
-    return isIndianMarket(result) ? `₹${formatted}` : formatted;
+    if (!isIndianMarket(result)) return formatted;
+    return state.profile?.preferences?.currency_display === 'code' ? `INR ${formatted}` : `₹${formatted}`;
   }
 
   function formatAxisPrice(value) {
@@ -240,20 +248,26 @@
     return `${label}: ${formatDateTimeIST(start)}–${formatDateTimeIST(displayEnd)}`;
   }
 
-  function formatYahooMeta(result, timing) {
-    const latest = timing.last_yahoo_market_bar ? formatDateTimeIST(timing.last_yahoo_market_bar, { year: false }) : '-';
-    const retrieved = timing.yahoo_retrieved_at ? formatDateTimeIST(timing.yahoo_retrieved_at, { year: false }) : '-';
-    const status = String(result.market_freshness || '').startsWith('Market closed') ? 'Market closed' : 'Market data may be delayed';
-    return [
-      ['Source', 'Yahoo Finance'],
-      ['Latest bar', latest],
-      ['Retrieved', retrieved],
-      ['Status', status],
+  function formatMarketMeta(result, timing) {
+    const latestTimestamp = timing.observed_end || timing.last_yahoo_market_bar;
+    const latest = latestTimestamp ? formatDateTimeIST(latestTimestamp, { year: false }) : 'Unavailable';
+    const source = result.data_source_name || result.input_source || 'Source unavailable';
+    const rows = [
+      ['Source', source],
+      ['Latest observed bar', latest],
     ];
+    if (result.source_type === 'live') {
+      const retrieved = timing.yahoo_retrieved_at
+        ? formatDateTimeIST(timing.yahoo_retrieved_at, { year: false })
+        : 'Unavailable';
+      rows.push(['Retrieved', retrieved]);
+    }
+    rows.push(['Data status', result.market_freshness || 'Freshness unavailable']);
+    return rows;
   }
 
-  function renderYahooMeta(result, timing) {
-    elements['yahoo-meta'].replaceChildren(...formatYahooMeta(result, timing).map(([label, value]) => {
+  function renderMarketMeta(result, timing) {
+    elements['yahoo-meta'].replaceChildren(...formatMarketMeta(result, timing).map(([label, value]) => {
       const item = document.createElement('span');
       const labelNode = document.createElement('b');
       labelNode.textContent = `${label}: `;
@@ -298,7 +312,7 @@
   function renderResult(result, previous = false) {
     const direction = result.direction;
     const icon = direction === 'up' ? '↑' : direction === 'down' ? '↓' : '→';
-    const directionText = direction === 'up' ? 'Up forecast' : direction === 'down' ? 'Down forecast' : 'Neutral forecast';
+    const directionText = direction === 'up' ? 'Forecast direction · upward' : direction === 'down' ? 'Forecast direction · downward' : 'Forecast direction · neutral';
     const created = formatTime(result.forecast_created_at);
 
     elements['empty-state'].hidden = true;
@@ -312,7 +326,7 @@
       ? `${result.company_name} · ${result.data_source_name || result.input_source}`
       : result.data_source_name || result.input_source;
     const timing = result.timing || {};
-    renderYahooMeta(result, timing);
+    renderMarketMeta(result, timing);
     elements['direction-summary'].dataset.direction = direction;
     elements['direction-icon'].textContent = icon;
     elements['direction-label'].textContent = directionText;
@@ -354,7 +368,7 @@
     const movementPhrase = Number(result.forecast_pct_change) >= 0
       ? `up ${Math.abs(Number(result.forecast_pct_change)).toFixed(2)} percent`
       : `down ${Math.abs(Number(result.forecast_pct_change)).toFixed(2)} percent`;
-    const validationPhrase = validation ? ` Historical validation compares this prediction with ${validation.compared_rows} hidden actual future bars. MAE is ${formatPrice(validation.mae, result)} and RMSE is ${formatPrice(validation.rmse, result)}.` : '';
+    const validationPhrase = validation ? ` Historical performance compares this forecast with ${validation.compared_rows} observed bars from the future window. MAE is ${formatPrice(validation.mae, result)} and RMSE is ${formatPrice(validation.rmse, result)}.` : '';
     elements['chart-summary'].textContent = `${result.normalized_symbol}: observed data ends at ${formatDateTimeIST(timing.observed_end)}. Kronos prediction starts at ${formatDateTimeIST(timing.first_forecast_timestamp)}. The predicted candles and dashed line are model-generated. Closed-market periods omitted: ${forecastSessions.closedText || 'none in the displayed prediction'}. Forecast sessions: ${forecastSessions.text}. Final forecast bar: ${formatTimeRangeIST(timing.final_forecast_timestamp, addMinutes(timing.final_forecast_timestamp, 5))} IST. The last observed close is ${formatPrice(result.last_observed_close, result)} and the final forecast close is ${formatPrice(result.forecast_final_close, result)}, ${movementPhrase}.${validationPhrase}`;
     elements['forecast-chart'].title = `Predicted close: ${formatPrice(result.forecast_final_close, result)} at the final forecast bar.`;
     drawChart(result);
@@ -444,7 +458,6 @@
     state.phase = 'success';
     elements['error-panel'].hidden = true;
     elements['chart-loading'].hidden = true;
-    if (initial) syncControlsToResult(result);
     renderResult(result, false);
     resetExplanation('The forecast works without this optional step.');
     setReadiness('ready', 'Ready');
@@ -467,21 +480,6 @@
     });
   }
 
-  function syncControlsToResult(result) {
-    const source = result.source_type === 'csv' ? 'csv' : 'live';
-    const mode = result.mode === 'validation' ? 'validation' : 'live';
-    const horizon = String(result.forecast_rows || result.prediction_length || 75);
-    const sourceInput = document.querySelector(`input[name="source-mode"][value="${source}"]`);
-    const modeInput = document.querySelector(`input[name="forecast-mode"][value="${mode}"]`);
-    const horizonInput = document.querySelector(`input[name="forecast-horizon"][value="${horizon}"]`);
-    if (sourceInput) sourceInput.checked = true;
-    if (modeInput) modeInput.checked = true;
-    if (horizonInput) horizonInput.checked = true;
-    state.forecastMode = mode;
-    state.horizonBars = Number(horizon);
-    setSourceMode(source);
-  }
-
   function updateForecastButtons() {
     const liveButton = elements['live-forecast-button'];
     const csvButton = elements['csv-forecast-button'];
@@ -491,9 +489,9 @@
 
     liveButton.disabled = !sanitizeTicker(elements['ticker-input'].value) || Boolean(isDuplicateLive);
     liveButton.dataset.loading = String(Boolean(isDuplicateLive));
-    const actionLabel = selectedMode() === 'validation' ? 'Validate model' : 'Run forecast';
+    const actionLabel = selectedMode() === 'validation' ? 'Run historical check' : 'Run forecast';
     setButtonLabel(liveButton, isDuplicateLive
-      ? `${selectedMode() === 'validation' ? 'Validating' : 'Forecasting'} ${state.pending.label}`
+      ? `${selectedMode() === 'validation' ? 'Checking historical performance for' : 'Forecasting'} ${state.pending.label}`
       : pendingLive ? actionLabel : actionLabel);
 
     const selectedFile = elements['csv-input'].files?.[0];
@@ -527,8 +525,212 @@
     } catch {
       payload = {};
     }
-    if (!response.ok) throw new Error(payload.error || 'The local server could not complete the request.');
+    if (!response.ok) {
+      if (response.status === 401 && url !== '/api/auth/session' && url !== '/api/auth/sign-in') {
+        showSignedOut(false, 'Your local session has expired. Continue again to reopen this profile.');
+      }
+      throw new Error(payload.error || 'The local server could not complete the request.');
+    }
     return payload;
+  }
+
+  function showAuthError(message) {
+    elements['auth-error'].textContent = message;
+    elements['auth-error'].hidden = !message;
+  }
+
+  function showProfileError(message) {
+    elements['profile-error'].textContent = message;
+    elements['profile-error'].hidden = !message;
+  }
+
+  function showSignedOut(firstRun, message = '') {
+    state.authFirstRun = Boolean(firstRun);
+    state.profile = null;
+    state.currentResult = null;
+    state.previousResult = null;
+    state.pending = null;
+    state.forecastController?.abort();
+    state.explanationController?.abort();
+    state.searchController?.abort();
+    state.requestSequence += 1;
+    state.cachedExplanation = null;
+    state.explanationVisible = false;
+    state.searchResults = [];
+    state.selectedListing = null;
+    state.lastAttempt = null;
+    state.sourceMode = 'live';
+    state.forecastMode = 'live';
+    state.horizonBars = 75;
+    state.exchange = 'NSE';
+    state.chartMode = 'candles';
+    state.phase = 'signed-out';
+    elements['dashboard-view'].hidden = true;
+    elements['auth-screen'].hidden = false;
+    elements['account-controls'].hidden = true;
+    elements['account-name'].textContent = '';
+    elements['auth-title'].textContent = firstRun
+      ? 'Create a local research profile'
+      : 'Continue to your research workspace';
+    elements['auth-name'].required = Boolean(firstRun);
+    elements['auth-name-label'].textContent = firstRun ? 'Name' : 'Name (needed for a new profile)';
+    elements['auth-submit'].textContent = firstRun ? 'Create local profile' : 'Continue locally';
+    showAuthError(message);
+    if (elements['forecast-result']) elements['forecast-result'].hidden = true;
+    if (elements['empty-state']) elements['empty-state'].hidden = false;
+    if (elements['error-panel']) elements['error-panel'].hidden = true;
+    if (elements['chart-loading']) elements['chart-loading'].hidden = true;
+    if (elements['selected-symbol-help']) elements['selected-symbol-help'].textContent = '';
+    if (elements['symbol-search-list']) closeSearchMenu();
+    if (elements['ticker-input']) elements['ticker-input'].value = 'RELIANCE';
+    if (elements['csv-input']) elements['csv-input'].value = '';
+    if (elements['source-live']) elements['source-live'].checked = true;
+    if (elements['source-csv']) elements['source-csv'].checked = false;
+    if (elements['explanation-text']) resetExplanation('Sign in to view this profile’s saved explanation.');
+    (firstRun ? elements['auth-name'] : elements['auth-email']).focus();
+  }
+
+  function applyProfilePreferences(profile) {
+    state.profile = profile;
+    const preferences = profile.preferences || {};
+    const exchange = preferences.preferred_exchange === 'BSE' ? 'BSE' : 'NSE';
+    const mode = preferences.default_research_mode === 'historical' ? 'validation' : 'live';
+    const horizon = [24, 75, 120].includes(Number(preferences.default_horizon))
+      ? Number(preferences.default_horizon)
+      : 75;
+    elements['exchange-nse'].checked = exchange === 'NSE';
+    elements['exchange-bse'].checked = exchange === 'BSE';
+    elements['mode-live'].checked = mode === 'live';
+    elements['mode-validation'].checked = mode === 'validation';
+    document.querySelectorAll('input[name="forecast-horizon"]').forEach((input) => {
+      input.checked = Number(input.value) === horizon;
+    });
+    elements['source-live'].checked = true;
+    elements['source-csv'].checked = false;
+    state.exchange = exchange;
+    state.forecastMode = mode;
+    state.horizonBars = horizon;
+    setChartMode(preferences.chart_mode === 'line' ? 'line' : 'candles');
+    setSourceMode('live');
+    updateModeAndHorizonCopy();
+    updateQuickTickerState();
+  }
+
+  async function restoreLocalSession() {
+    try {
+      const result = await fetchJson('/api/auth/session');
+      if (result.authenticated && result.profile) {
+        enterWorkspace(result.profile);
+      } else {
+        showSignedOut(Boolean(result.first_run));
+      }
+    } catch (error) {
+      showSignedOut(true, `The local server could not be reached. ${error.message}`);
+    }
+  }
+
+  function enterWorkspace(profile) {
+    state.authFirstRun = false;
+    elements['auth-screen'].hidden = true;
+    elements['dashboard-view'].hidden = false;
+    elements['account-controls'].hidden = false;
+    elements['account-name'].textContent = profile.name;
+    elements['account-name'].title = profile.email;
+    elements['auth-email'].value = '';
+    elements['auth-name'].value = '';
+    showAuthError('');
+    applyProfilePreferences(profile);
+    loadInitialDashboard();
+  }
+
+  function openProfileDialog() {
+    const profile = state.profile;
+    if (!profile) return;
+    const preferences = profile.preferences || {};
+    elements['profile-name'].value = profile.name || '';
+    elements['profile-email'].value = profile.email || '';
+    elements['profile-exchange'].value = preferences.preferred_exchange || 'NSE';
+    elements['profile-chart-mode'].value = preferences.chart_mode || 'candles';
+    elements['profile-currency'].value = preferences.currency_display || 'symbol';
+    elements['profile-volume'].checked = preferences.show_volume !== false;
+    elements['profile-horizon'].value = String(preferences.default_horizon || 75);
+    elements['profile-mode'].value = preferences.default_research_mode || 'forecast';
+    showProfileError('');
+    elements['profile-dialog'].showModal();
+    elements['profile-name'].focus();
+  }
+
+  async function submitLocalSignIn(event) {
+    event.preventDefault();
+    showAuthError('');
+    elements['auth-submit'].disabled = true;
+    elements['auth-submit'].textContent = 'Opening local profile…';
+    try {
+      const result = await fetchJson('/api/auth/sign-in', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: elements['auth-email'].value,
+          name: elements['auth-name'].value,
+        }),
+      });
+      enterWorkspace(result.profile);
+    } catch (error) {
+      showAuthError(error.message);
+    } finally {
+      elements['auth-submit'].disabled = false;
+      elements['auth-submit'].textContent = state.authFirstRun ? 'Create local profile' : 'Continue locally';
+    }
+  }
+
+  async function saveProfile(event) {
+    event.preventDefault();
+    showProfileError('');
+    const preferences = {
+      preferred_exchange: elements['profile-exchange'].value,
+      chart_mode: elements['profile-chart-mode'].value,
+      currency_display: elements['profile-currency'].value,
+      show_volume: elements['profile-volume'].checked,
+      default_horizon: Number(elements['profile-horizon'].value),
+      default_research_mode: elements['profile-mode'].value,
+    };
+    try {
+      const result = await fetchJson('/api/auth/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: elements['profile-name'].value, preferences }),
+      });
+      applyProfilePreferences(result.profile);
+      elements['account-name'].textContent = result.profile.name;
+      elements['account-name'].title = result.profile.email;
+      elements['profile-dialog'].close();
+      if (state.currentResult) renderResult(state.currentResult, false);
+      setRequestStatus('ready', 'Profile preferences saved for this local profile.');
+    } catch (error) {
+      showProfileError(error.message);
+    }
+  }
+
+  async function signOut() {
+    const button = elements['sign-out-button'];
+    button.disabled = true;
+    try {
+      await fetchJson('/api/auth/sign-out', { method: 'POST' });
+      showSignedOut(false);
+    } catch (error) {
+      setRequestStatus('error', `Could not sign out: ${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function bindAuthEvents() {
+    elements['auth-form'].addEventListener('submit', submitLocalSignIn);
+    elements['sign-out-button'].addEventListener('click', signOut);
+    elements['profile-open'].addEventListener('click', openProfileDialog);
+    elements['profile-close'].addEventListener('click', () => elements['profile-dialog'].close());
+    elements['profile-cancel'].addEventListener('click', () => elements['profile-dialog'].close());
+    elements['profile-form'].addEventListener('submit', saveProfile);
   }
 
   function setSelectedListing(listing) {
@@ -862,7 +1064,7 @@
     if (elements['local-note']) elements['local-note'].textContent = `About 5 trading days → ${horizonText}`;
     if (state.phase !== 'loading') {
       setRequestStatus('ready', state.forecastMode === 'validation'
-        ? `Model validation selected. Kronos will hide the final ${state.horizonBars} bars, predict them, then compare with actuals.`
+        ? `Historical performance selected. Kronos will forecast the final ${state.horizonBars} bars, then compare them with the observed future window.`
         : `Live forecast selected. Kronos will predict ${state.horizonBars} future market bars.`);
     }
     updateForecastButtons();
@@ -952,7 +1154,7 @@
     const inset = { top: 36, right: compact ? 12 : 22, bottom: 34, left: compact ? 48 : 62 };
     const plotWidth = width - inset.left - inset.right;
     const volumeValues = [...observed, ...forecast].map((point) => Number(point.volume)).filter((value) => Number.isFinite(value) && value >= 0);
-    const showVolume = candleMode && volumeValues.some((value) => value > 0);
+    const showVolume = candleMode && state.profile?.preferences?.show_volume !== false && volumeValues.some((value) => value > 0);
     const volumeHeight = showVolume ? (compact ? 42 : 54) : 0;
     const volumeGap = showVolume ? 18 : 0;
     const priceBottom = height - inset.bottom - volumeHeight - volumeGap;
@@ -982,6 +1184,7 @@
       positive: cssVar('--positive') || '#176b45',
       negative: cssVar('--negative') || '#a83a37',
       neutral: cssVar('--neutral') || '#5f6670',
+      forecast: cssVar('--accent') || '#315f67',
       actual: cssVar('--warning') || '#9a6a08',
     };
 
@@ -1006,7 +1209,7 @@
       context.fillText(formatAxisPrice(labelValue), inset.left - 8, gridY);
     }
 
-    const forecastColor = result.direction === 'up' ? chartColors.positive : result.direction === 'down' ? chartColors.negative : chartColors.neutral;
+    const forecastColor = chartColors.forecast;
     const candleWidth = Math.max(3, Math.min(compact ? 6 : 8, plotWidth / Math.max(pointCount, 1) * 0.58));
 
     if (candleMode) {
@@ -1226,18 +1429,19 @@
     cacheElements();
     setTheme(document.documentElement.dataset.theme || 'light');
     bindEvents();
-    updateQuickTickerState();
-    updateForecastButtons();
-    loadInitialDashboard();
+    bindAuthEvents();
     window.kronosDashboard = {
       getState: () => ({
         phase: state.phase,
+        localDemo: true,
+        signedIn: Boolean(state.profile),
         requestSequence: state.requestSequence,
         pending: state.pending ? { ...state.pending } : null,
         currentSymbol: state.currentResult?.normalized_symbol || null,
         currentFingerprint: state.currentResult?.summary_fingerprint || null,
       }),
     };
+    restoreLocalSession();
   }
 
   document.addEventListener('DOMContentLoaded', initialize);

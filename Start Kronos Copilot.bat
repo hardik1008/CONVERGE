@@ -7,7 +7,7 @@ cd /d "%~dp0"
 set "PROJECT_DIR=%~dp0"
 set "PYTHON_EXE=%PROJECT_DIR%.venv\Scripts\python.exe"
 set "DASHBOARD_URL=http://127.0.0.1:8000/app/dashboard.html"
-set "READY_URL=http://127.0.0.1:8000/api/dashboard"
+set "READY_URL=http://127.0.0.1:8000/api/auth/session"
 set "CHROME_EXE=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME_EXE%" set "CHROME_EXE=C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 

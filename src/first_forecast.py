@@ -153,8 +153,10 @@ def run_kronos_forecast(
     top_p: float | None = None,
     sample_count: int | None = None,
     yahoo_retrieved_at: str | None = None,
+    output_dir: str | Path | None = None,
 ) -> dict[str, object]:
-    OUTPUTS_DIR.mkdir(exist_ok=True)
+    output_directory = Path(output_dir) if output_dir is not None else OUTPUTS_DIR
+    output_directory.mkdir(parents=True, exist_ok=True)
     input_path = Path(input_path or os.environ.get("KRONOS_INPUT_PATH", DATA_FILE))
     forecast_bars = resolve_forecast_bars(
         forecast_bars or os.environ.get("KRONOS_FORECAST_BARS") or os.environ.get("KRONOS_FORECAST_HORIZON")
@@ -181,7 +183,7 @@ def run_kronos_forecast(
         top_p=top_p,
         sample_count=sample_count,
     )
-    forecast.to_csv(OUTPUTS_DIR / "forecast.csv", index=False)
+    forecast.to_csv(output_directory / "forecast.csv", index=False)
 
     input_source = input_label or os.environ.get("KRONOS_INPUT_LABEL", input_path.name)
     if yahoo_retrieved_at:
@@ -197,7 +199,7 @@ def run_kronos_forecast(
         sample_count=sample_count,
         inference_seconds=inference_seconds,
     )
-    (OUTPUTS_DIR / "forecast_summary.json").write_text(
+    (output_directory / "forecast_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
     return summary

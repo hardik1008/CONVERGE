@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#f4f5f7" />
+    <meta name="theme-color" content="#f5f6f5" />
     <title>Kronos Copilot</title>
     <script>
       (() => {
@@ -14,8 +14,8 @@
         document.documentElement.style.colorScheme = theme;
       })();
     </script>
-    <link rel="stylesheet" href="./dashboard.css?v=10" />
-    <script src="./dashboard.js?v=10" defer></script>
+    <link rel="stylesheet" href="./dashboard.css?v=11" />
+    <script src="./dashboard.js?v=11" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#market-controls">Skip to market controls</a>
@@ -31,6 +31,7 @@
         </div>
 
         <div class="system-status" aria-label="System status">
+          <span class="local-mode-pill">Local/demo mode</span>
           <div class="system-status__item">
             <span class="system-status__label">Forecast</span>
             <strong>Local</strong>
@@ -44,17 +45,42 @@
             </button>
             <span id="theme-status" class="sr-only" aria-live="polite">Light appearance</span>
           </div>
-          <div class="readiness" id="readiness-indicator" data-tone="ready">
+          <div class="readiness status-pill" id="readiness-indicator" data-tone="ready">
             <span class="readiness__dot" aria-hidden="true"></span>
             <span id="readiness-text">Ready</span>
+          </div>
+          <div id="account-controls" class="account-controls" hidden>
+            <span id="account-name" class="account-name"></span>
+            <button id="profile-open" class="button button--secondary account-button" type="button">Profile</button>
+            <button id="sign-out-button" class="button button--text account-button" type="button">Sign out</button>
           </div>
         </div>
       </div>
     </header>
 
-    <main class="page-shell">
-      <section id="market-controls" class="control-surface" aria-labelledby="controls-title">
-        <div class="control-surface__heading">
+    <main id="main-content">
+    <section id="auth-screen" class="auth-shell" aria-labelledby="auth-title">
+      <section class="auth-card surface-card">
+        <p class="eyebrow">Local/demo mode</p>
+        <h1 id="auth-title">Continue to your research workspace</h1>
+        <p class="auth-intro">Email identifies this local profile so preferences and saved research stay separate; your name labels it. Details stay in this app’s ignored runtime data on this computer. This mode does not verify identity and asks for no password or API key.</p>
+        <form id="auth-form" novalidate>
+          <label id="auth-name-label" class="field-label" for="auth-name">Name</label>
+          <input id="auth-name" name="name" type="text" maxlength="80" autocomplete="name" aria-describedby="auth-name-help" />
+          <small id="auth-name-help" class="field-help">Required only when creating a new local profile.</small>
+
+          <label class="field-label auth-email-label" for="auth-email">Email or profile identifier</label>
+          <input id="auth-email" name="email" type="email" maxlength="254" autocomplete="email" required />
+          <p id="auth-error" class="form-error" role="alert" hidden></p>
+          <button id="auth-submit" class="button button--primary auth-submit" type="submit">Continue locally</button>
+        </form>
+        <p class="auth-footnote">Profile details are stored in this app’s ignored local runtime data. Sign out to lock the workspace on this browser.</p>
+      </section>
+    </section>
+
+    <div id="dashboard-view" class="page-shell" hidden>
+      <section id="market-controls" class="control-surface surface-card" aria-labelledby="controls-title">
+        <div class="control-surface__heading section-heading">
           <div>
             <h1 id="controls-title">Create a market forecast</h1>
             <p>Choose an Indian exchange and run a local forecast on recent Yahoo Finance market bars.</p>
@@ -65,17 +91,17 @@
         <div class="control-grid">
           <fieldset class="control-group mode-group">
             <legend>Mode</legend>
-            <div class="segmented-control">
+            <div class="segmented-control tabs">
               <input id="mode-live" name="forecast-mode" type="radio" value="live" checked />
               <label for="mode-live">Live forecast</label>
               <input id="mode-validation" name="forecast-mode" type="radio" value="validation" />
-              <label for="mode-validation">Model validation</label>
+              <label for="mode-validation">Historical performance</label>
             </div>
           </fieldset>
 
           <fieldset class="control-group source-group">
             <legend>Data source</legend>
-            <div class="segmented-control">
+            <div class="segmented-control tabs">
               <input id="source-live" name="source-mode" type="radio" value="live" checked />
               <label for="source-live">Yahoo market</label>
               <input id="source-csv" name="source-mode" type="radio" value="csv" />
@@ -85,7 +111,7 @@
 
           <fieldset class="control-group horizon-group">
             <legend>Forecast horizon</legend>
-            <div class="segmented-control">
+            <div class="segmented-control tabs">
               <input id="horizon-24" name="forecast-horizon" type="radio" value="24" />
               <label for="horizon-24">2h</label>
               <input id="horizon-75" name="forecast-horizon" type="radio" value="75" checked />
@@ -97,7 +123,7 @@
 
           <fieldset class="control-group exchange-group" id="exchange-control">
             <legend>Exchange</legend>
-            <div class="segmented-control">
+            <div class="segmented-control tabs">
               <input id="exchange-nse" name="exchange" type="radio" value="NSE" checked />
               <label for="exchange-nse">NSE</label>
               <input id="exchange-bse" name="exchange" type="radio" value="BSE" />
@@ -176,13 +202,13 @@
 
         <div class="result-headline">
           <div class="result-identity">
-            <div class="symbol-line"><h2 id="result-symbol">-</h2><span id="result-exchange" class="exchange-badge">-</span></div>
+            <div class="symbol-line"><h2 id="result-symbol">-</h2><span id="result-exchange" class="exchange-badge status-pill">-</span></div>
             <p id="result-source" class="result-source">-</p>
             <p id="yahoo-meta" class="result-meta">-</p>
           </div>
           <div id="direction-summary" class="direction-summary" data-direction="neutral">
             <span id="direction-icon" class="direction-icon" aria-hidden="true">→</span>
-            <div><span id="direction-label" class="direction-label">Neutral forecast</span><strong id="movement-value">0.00%</strong></div>
+            <div><span id="direction-label" class="direction-label">Forecast direction</span><strong id="movement-value">0.00%</strong></div>
           </div>
           <div class="headline-prices">
             <div><span>Last observed</span><strong id="last-close">-</strong></div>
@@ -191,16 +217,16 @@
           </div>
         </div>
 
-        <article class="chart-panel" aria-labelledby="chart-title">
+        <article class="chart-panel surface-card" aria-labelledby="chart-title">
           <div class="chart-header">
             <div><p id="chart-eyebrow" class="eyebrow">Observed and predicted candles</p><h3 id="chart-title"><span id="chart-symbol">-</span> price chart</h3></div>
             <div class="chart-actions">
-              <div class="chart-view-switch" role="group" aria-label="Chart view">
+              <div class="chart-view-switch tabs" role="group" aria-label="Chart view">
                 <button id="chart-candles" type="button" aria-pressed="true">Candles</button>
                 <button id="chart-line" type="button" aria-pressed="false">Price</button>
               </div>
             </div>
-            <span class="chart-interval"><span id="chart-interval">Each point = 5 minutes</span><span class="info-dot" tabindex="0" role="img" aria-label="Each observed point summarizes one five-minute Yahoo Finance market bar. Each forecast point represents one predicted five-minute trading period.">i</span></span>
+            <span class="chart-interval"><span id="chart-interval">Each point = 5 minutes</span><span class="info-dot help-tooltip" tabindex="0" role="img" aria-label="Each observed point summarizes one five-minute market bar from its listed source. Each forecast point represents one predicted five-minute trading period.">i</span></span>
           </div>
           <div class="chart-legend" aria-label="Chart legend">
             <span><i class="legend-candle legend-candle--observed" aria-hidden="true"></i><span id="legend-observed">Observed candles</span></span>
@@ -224,18 +250,23 @@
           <p id="chart-summary" class="sr-only">No forecast chart is available yet.</p>
         </article>
 
-        <div class="metric-grid" aria-label="Forecast details">
-          <article class="metric-card"><span>Forecast range</span><strong id="forecast-range">-</strong><small>Projected close low to high</small></article>
-          <article class="metric-card"><span>Forecast horizon</span><strong id="forecast-horizon">Next 75 market bars</strong><small id="forecast-horizon-detail">Equivalent to one full trading session · 6h 15m of trading · Closed-market hours skipped</small></article>
-          <article class="metric-card"><span>Model context</span><strong id="record-counts">400 input bars</strong><small>Kronos reads recent five-minute market history</small></article>
-          <article class="metric-card"><span>Chart context</span><strong id="chart-context">Latest bars</strong><small id="chart-context-detail">Displayed from the 400 bars used by Kronos</small></article>
-          <article class="metric-card"><span>Created</span><strong id="forecast-time">-</strong><small id="forecast-date">Local time</small></article>
+        <div class="metric-grid metric-row" aria-label="Forecast details">
+          <article class="metric-card surface-card"><span>Forecast range</span><strong id="forecast-range">-</strong><small>Projected close low to high</small></article>
+          <article class="metric-card surface-card"><span>Forecast horizon</span><strong id="forecast-horizon">Next 75 market bars</strong><small id="forecast-horizon-detail">Equivalent to one full trading session · 6h 15m of trading · Closed-market hours skipped</small></article>
+          <article class="metric-card surface-card"><span>Model context</span><strong id="record-counts">400 input bars</strong><small>Kronos reads recent five-minute market history</small></article>
+          <article class="metric-card surface-card"><span>Chart context</span><strong id="chart-context">Latest bars</strong><small id="chart-context-detail">Displayed from the 400 bars used by Kronos</small></article>
+          <article class="metric-card surface-card"><span>Created</span><strong id="forecast-time">-</strong><small id="forecast-date">Local time</small></article>
         </div>
+
+        <aside class="uncertainty-note" aria-label="Forecast uncertainty">
+          <span class="uncertainty-note__mark" aria-hidden="true">i</span>
+          <p><strong>Uncertainty</strong> The forecast range shows the lowest and highest predicted closes across this horizon. It is not a confidence interval or probability, and no calibrated confidence score is provided.</p>
+        </aside>
 
         <section id="validation-panel" class="validation-panel" aria-labelledby="validation-title" hidden>
           <div>
-            <p class="eyebrow">Model validation</p>
-            <h3 id="validation-title">Kronos prediction vs hidden actual future</h3>
+            <p class="eyebrow">Historical performance</p>
+            <h3 id="validation-title">Forecast compared with the observed future window</h3>
           </div>
           <div class="validation-grid">
             <span><small>MAE</small><strong id="validation-mae">-</strong></span>
@@ -246,11 +277,11 @@
         </section>
       </section>
 
-      <section class="model-ai-grid" aria-label="Model and explanation details">
-        <article class="model-panel">
+      <section class="model-ai-grid" aria-label="Evidence and explanation details">
+        <article class="model-panel surface-card">
           <div class="panel-heading">
-            <div><p class="eyebrow">Forecast model</p><h2>Kronos-base</h2></div>
-            <span class="local-badge"><i aria-hidden="true"></i>Running locally</span>
+            <div><p class="eyebrow">Methodology and provenance</p><h2>Kronos-base</h2></div>
+            <span class="local-badge status-pill"><i aria-hidden="true"></i>Running locally</span>
           </div>
           <p id="model-copy" class="panel-copy">Kronos reads 400 past five-minute bars and predicts 75 future five-minute bars.</p>
           <dl class="model-facts">
@@ -261,13 +292,13 @@
             <div><dt>Model source</dt><dd id="model-name">NeoQuasar/Kronos-base</dd></div>
           </dl>
         </article>
-        <article class="ai-panel">
+        <article class="ai-panel surface-card">
           <div class="panel-heading">
             <div><p class="eyebrow">AI explanation</p><h2>Plain-language context</h2></div>
-            <span id="explanation-badge" class="explanation-badge">Optional</span>
+            <span id="explanation-badge" class="explanation-badge status-pill">Optional</span>
           </div>
           <div class="ai-trust-notice">
-            <strong>Forecast generated locally by Kronos-base</strong>
+            <strong>Evidence and interpretation</strong>
             <span>AI explains this result only. It does not generate or change the forecast.</span>
             <small>Research demonstration only · Not financial advice</small>
           </div>
@@ -282,6 +313,35 @@
       </section>
 
       <p class="disclaimer">Research demonstration only. Forecasts are estimates, not financial advice or a guarantee of market movement. Yahoo Finance market data may be delayed.</p>
+    </div>
     </main>
+
+    <dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-title">
+      <form id="profile-form" novalidate>
+        <div class="profile-heading">
+          <div>
+            <p class="eyebrow">Local profile</p>
+            <h2 id="profile-title">Research preferences</h2>
+          </div>
+          <button id="profile-close" class="button button--text profile-close" type="button" aria-label="Close profile">Close</button>
+        </div>
+        <p class="profile-intro">Name and preferences personalize this workspace. Email identifies this local profile and cannot be changed here.</p>
+        <div class="profile-fields">
+          <label class="profile-field" for="profile-name">Name<input id="profile-name" name="name" type="text" maxlength="80" autocomplete="name" required /></label>
+          <label class="profile-field" for="profile-email">Email or profile identifier<input id="profile-email" name="email" type="email" readonly /></label>
+          <label class="profile-field" for="profile-exchange">Preferred exchange<select id="profile-exchange" name="preferred_exchange"><option value="NSE">NSE</option><option value="BSE">BSE</option></select></label>
+          <label class="profile-field" for="profile-chart-mode">Chart display<select id="profile-chart-mode" name="chart_mode"><option value="candles">Candles</option><option value="line">Price line</option></select></label>
+          <label class="profile-field" for="profile-currency">Price format<select id="profile-currency" name="currency_display"><option value="symbol">₹ symbol</option><option value="code">INR code</option></select></label>
+          <label class="profile-field" for="profile-horizon">Default forecast horizon<select id="profile-horizon" name="default_horizon"><option value="24">2 hours · 24 bars</option><option value="75">Session · 75 bars</option><option value="120">Extended · 120 bars</option></select></label>
+          <label class="profile-field" for="profile-mode">Default research view<select id="profile-mode" name="default_research_mode"><option value="forecast">Forecast</option><option value="historical">Historical performance</option></select></label>
+          <label class="profile-checkbox" for="profile-volume"><input id="profile-volume" name="show_volume" type="checkbox" /> Show volume in candle charts</label>
+        </div>
+        <p id="profile-error" class="form-error" role="alert" hidden></p>
+        <div class="profile-actions">
+          <button id="profile-cancel" class="button button--secondary" type="button">Cancel</button>
+          <button class="button button--primary" type="submit">Save preferences</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

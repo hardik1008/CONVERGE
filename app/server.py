@@ -12,8 +12,10 @@ import subprocess
 import sys
 import threading
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -24,8 +26,10 @@ from openai import OpenAI
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from app.local_auth import LocalAuthStore, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS
 from forecast_config import (
     DEFAULT_SAMPLE_COUNT,
     DEFAULT_TEMPERATURE,
@@ -45,14 +49,11 @@ from forecast_config import (
 )
 from first_forecast import FEATURES, MODEL_NAME as KRONOS_MODEL_NAME, build_summary, predict_with_kronos, run_kronos_forecast
 
-SUMMARY_PATH = PROJECT_ROOT / "outputs" / "forecast_summary.json"
-CACHE_PATH = PROJECT_ROOT / "outputs" / "explanation.json"
+OUTPUTS_ROOT = PROJECT_ROOT / "outputs"
+USER_OUTPUTS_ROOT = OUTPUTS_ROOT / "users"
+AUTH_STORE = LocalAuthStore(OUTPUTS_ROOT / "local_profiles.json")
+CURRENT_USER_ID: ContextVar[str | None] = ContextVar("kronos_current_user_id", default=None)
 ENV_PATH = PROJECT_ROOT / ".env.local"
-UPLOADED_DATA_PATH = PROJECT_ROOT / "data" / "uploaded_market_data.csv"
-FORECAST_SCRIPT = PROJECT_ROOT / "src" / "first_forecast.py"
-FORECAST_PATH = PROJECT_ROOT / "outputs" / "forecast.csv"
-VALIDATION_ACTUAL_PATH = PROJECT_ROOT / "outputs" / "validation_actual.csv"
-FORECAST_CACHE_DIR = PROJECT_ROOT / "outputs" / "forecast_cache"
 MODEL_NAME = "gpt-5-mini"
 EXPLANATION_PROMPT_VERSION = "3"
 FORECAST_LOCK = threading.Lock()
@@ -60,6 +61,19 @@ EXPLANATION_LOCK = threading.Lock()
 REQUIRED_COLUMNS = ["timestamps", "open", "high", "low", "close", "volume", "amount"]
 SYMBOL_SEARCH_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, str]]]] = {}
 SYMBOL_SEARCH_TTL_SECONDS = 300
+
+
+def current_output_dir() -> Path:
+    user_id = CURRENT_USER_ID.get()
+    if not user_id:
+        return OUTPUTS_ROOT
+    if not re.fullmatch(r"[a-f0-9]{64}", user_id):
+        raise ValueError("The local profile identifier is invalid.")
+    return USER_OUTPUTS_ROOT / user_id
+
+
+def output_path(name: str) -> Path:
+    return current_output_dir() / name
 
 
 def load_local_key() -> None:
@@ -74,31 +88,35 @@ def load_local_key() -> None:
 
 
 def load_summary() -> dict[str, object]:
-    if not SUMMARY_PATH.exists():
+    summary_path = output_path("forecast_summary.json")
+    if not summary_path.exists():
         raise FileNotFoundError("Run the local Kronos forecast before requesting an explanation.")
-    return json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
+    return json.loads(summary_path.read_text(encoding="utf-8"))
 
 
 def forecast_identity(summary: dict[str, object]) -> dict[str, object]:
     """Return the stable fields that bind an explanation to one exact forecast."""
     input_source = str(summary.get("input_source", ""))
     _, normalized_symbol, exchange, source_type = source_identity(input_source)
-    history = pd.read_csv(UPLOADED_DATA_PATH) if UPLOADED_DATA_PATH.exists() else pd.DataFrame()
+    uploaded_data_path = output_path("uploaded_market_data.csv")
+    forecast_path = output_path("forecast.csv")
+    summary_path = output_path("forecast_summary.json")
+    history = pd.read_csv(uploaded_data_path) if uploaded_data_path.exists() else pd.DataFrame()
     timestamps = (
         coerce_market_timestamps(history.get("timestamps")).dropna()
         if "timestamps" in history
         else pd.Series(dtype="datetime64[ns]")
     )
     last_observed_timestamp = timestamps.iloc[-1].isoformat() if not timestamps.empty else ""
-    forecast = pd.read_csv(FORECAST_PATH) if FORECAST_PATH.exists() else pd.DataFrame()
+    forecast = pd.read_csv(forecast_path) if forecast_path.exists() else pd.DataFrame()
     forecast_timestamps = (
         coerce_market_timestamps(forecast.get("timestamps")).dropna()
         if "timestamps" in forecast
         else pd.Series(dtype="datetime64[ns]")
     )
     forecast_hash = (
-        hashlib.sha256(FORECAST_PATH.read_bytes()).hexdigest()
-        if FORECAST_PATH.exists()
+        hashlib.sha256(forecast_path.read_bytes()).hexdigest()
+        if forecast_path.exists()
         else ""
     )
     return {
@@ -111,8 +129,8 @@ def forecast_identity(summary: dict[str, object]) -> dict[str, object]:
         "final_forecast_timestamp": forecast_timestamps.iloc[-1].isoformat() if not forecast_timestamps.empty else "",
         "forecast_count": int(summary.get("forecast_rows", 0) or 0),
         "forecast_version": datetime.fromtimestamp(
-            SUMMARY_PATH.stat().st_mtime, tz=timezone.utc
-        ).isoformat() if SUMMARY_PATH.exists() else "",
+            summary_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat() if summary_path.exists() else "",
         "kronos_model": summary.get("model"),
         "last_observed_price": summary.get("last_observed_close"),
         "final_forecast_price": summary.get("forecast_final_close"),
@@ -179,9 +197,10 @@ def compact_explanation_summary(summary: dict[str, object]) -> dict[str, object]
 
 
 def load_cached_explanation(summary: dict[str, object]) -> dict[str, object] | None:
-    if not CACHE_PATH.exists():
+    cache_path = output_path("explanation.json")
+    if not cache_path.exists():
         return None
-    cached = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
     if (
         cached.get("summary_fingerprint") == summary_fingerprint(summary)
         and cached.get("prompt_version") == EXPLANATION_PROMPT_VERSION
@@ -251,7 +270,7 @@ def _generate_explanation(requested_fingerprint: str | None = None) -> dict[str,
         "explanation": explanation,
         "model": MODEL_NAME,
     }
-    CACHE_PATH.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    output_path("explanation.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return {
         "explanation": explanation,
         "cached": False,
@@ -321,7 +340,7 @@ def forecast_cache_key(
 
 
 def cache_paths(key: str) -> tuple[Path, Path, Path]:
-    directory = FORECAST_CACHE_DIR / key
+    directory = current_output_dir() / "forecast_cache" / key
     return directory / "forecast.csv", directory / "summary.json", directory / "validation_actual.csv"
 
 
@@ -329,27 +348,31 @@ def restore_forecast_cache(key: str, validation: bool = False) -> dict[str, obje
     forecast_cache, summary_cache, actual_cache = cache_paths(key)
     if not forecast_cache.exists() or not summary_cache.exists():
         return None
-    FORECAST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(forecast_cache, FORECAST_PATH)
-    shutil.copy2(summary_cache, SUMMARY_PATH)
+    (current_output_dir() / "forecast_cache").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(forecast_cache, output_path("forecast.csv"))
+    shutil.copy2(summary_cache, output_path("forecast_summary.json"))
     if validation and actual_cache.exists():
-        shutil.copy2(actual_cache, VALIDATION_ACTUAL_PATH)
-    summary = json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
+        shutil.copy2(actual_cache, output_path("validation_actual.csv"))
+    summary_path = output_path("forecast_summary.json")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
     summary["cache_hit"] = True
-    SUMMARY_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
 
 def save_forecast_cache(key: str, validation: bool = False) -> None:
-    directory = FORECAST_CACHE_DIR / key
+    directory = current_output_dir() / "forecast_cache" / key
     directory.mkdir(parents=True, exist_ok=True)
     forecast_cache, summary_cache, actual_cache = cache_paths(key)
-    if FORECAST_PATH.exists():
-        shutil.copy2(FORECAST_PATH, forecast_cache)
-    if SUMMARY_PATH.exists():
-        shutil.copy2(SUMMARY_PATH, summary_cache)
-    if validation and VALIDATION_ACTUAL_PATH.exists():
-        shutil.copy2(VALIDATION_ACTUAL_PATH, actual_cache)
+    forecast_path = output_path("forecast.csv")
+    summary_path = output_path("forecast_summary.json")
+    actual_path = output_path("validation_actual.csv")
+    if forecast_path.exists():
+        shutil.copy2(forecast_path, forecast_cache)
+    if summary_path.exists():
+        shutil.copy2(summary_path, summary_cache)
+    if validation and actual_path.exists():
+        shutil.copy2(actual_path, actual_cache)
 
 
 def validation_metrics(predicted: pd.DataFrame, actual: pd.DataFrame, context: pd.DataFrame) -> dict[str, object]:
@@ -419,8 +442,9 @@ def run_validation(
         cached_summary = restore_forecast_cache(cache_key, validation=True)
         if cached_summary:
             return build_dashboard_payload(cached_summary, context, request_id)
-        UPLOADED_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-        UPLOADED_DATA_PATH.write_text(market_data.to_csv(index=False), encoding="utf-8")
+        uploaded_data_path = output_path("uploaded_market_data.csv")
+        uploaded_data_path.parent.mkdir(parents=True, exist_ok=True)
+        uploaded_data_path.write_text(market_data.to_csv(index=False), encoding="utf-8")
         forecast, inference_seconds = predict_with_kronos(
             context,
             actual["timestamps"],
@@ -430,8 +454,8 @@ def run_validation(
             top_p=DEFAULT_TOP_P,
             sample_count=DEFAULT_SAMPLE_COUNT,
         )
-        forecast.to_csv(FORECAST_PATH, index=False)
-        actual.to_csv(VALIDATION_ACTUAL_PATH, index=False)
+        forecast.to_csv(output_path("forecast.csv"), index=False)
+        actual.to_csv(output_path("validation_actual.csv"), index=False)
         summary = build_summary(
             context,
             forecast,
@@ -445,7 +469,7 @@ def run_validation(
         )
         summary.update(validation_metrics(forecast, actual, context))
         summary["cache_hit"] = False
-        SUMMARY_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        output_path("forecast_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         save_forecast_cache(cache_key, validation=True)
         payload = build_dashboard_payload(summary, context, request_id)
         return payload
@@ -629,12 +653,16 @@ def build_dashboard_payload(
     request_id: int | str | None = None,
 ) -> dict[str, object]:
     """Add UI metadata and chart points without changing forecast calculations."""
-    if history is None and UPLOADED_DATA_PATH.exists():
-        history = pd.read_csv(UPLOADED_DATA_PATH)
+    uploaded_data_path = output_path("uploaded_market_data.csv")
+    forecast_path = output_path("forecast.csv")
+    actual_path = output_path("validation_actual.csv")
+    summary_path = output_path("forecast_summary.json")
+    if history is None and uploaded_data_path.exists():
+        history = pd.read_csv(uploaded_data_path)
     if history is None:
         history = pd.DataFrame(columns=REQUIRED_COLUMNS)
 
-    forecast = pd.read_csv(FORECAST_PATH) if FORECAST_PATH.exists() else pd.DataFrame()
+    forecast = pd.read_csv(forecast_path) if forecast_path.exists() else pd.DataFrame()
     history = history.copy()
     if "timestamps" in history:
         history["timestamps"] = coerce_market_timestamps(history["timestamps"])
@@ -649,8 +677,8 @@ def build_dashboard_payload(
     observed_points = [market_point(row) for _, row in valid_history.iterrows()]
     forecast_points = [market_point(row) for _, row in forecast.dropna(subset=["timestamps", "close"]).iterrows()]
     actual_points: list[dict[str, object]] = []
-    if summary.get("mode") == "validation" and VALIDATION_ACTUAL_PATH.exists():
-        actual_data = pd.read_csv(VALIDATION_ACTUAL_PATH)
+    if summary.get("mode") == "validation" and actual_path.exists():
+        actual_data = pd.read_csv(actual_path)
         if "timestamps" in actual_data:
             actual_data["timestamps"] = coerce_market_timestamps(actual_data["timestamps"])
             actual_points = [
@@ -659,7 +687,7 @@ def build_dashboard_payload(
             ]
     all_history_timestamps = history.dropna(subset=["timestamps"])["timestamps"] if "timestamps" in history else pd.Series(dtype="datetime64[ns]")
     latest_market_bar = all_history_timestamps.iloc[-1] if not all_history_timestamps.empty else None
-    forecast_created_at = pd.Timestamp.fromtimestamp(SUMMARY_PATH.stat().st_mtime, tz=MARKET_TIMEZONE).isoformat()
+    forecast_created_at = pd.Timestamp.fromtimestamp(summary_path.stat().st_mtime, tz=MARKET_TIMEZONE).isoformat()
     yahoo_retrieved_at = str(summary.get("yahoo_retrieved_at", "")) or None
     data_source_name = (
         "Yahoo Finance · Recent five-minute market data"
@@ -747,13 +775,14 @@ def run_forecast(
         cached_summary = restore_forecast_cache(cache_key)
         if cached_summary:
             return build_dashboard_payload(cached_summary, market_data, request_id)
-        UPLOADED_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-        UPLOADED_DATA_PATH.write_text(csv_text, encoding="utf-8")
+        uploaded_data_path = output_path("uploaded_market_data.csv")
+        uploaded_data_path.parent.mkdir(parents=True, exist_ok=True)
+        uploaded_data_path.write_text(csv_text, encoding="utf-8")
         yahoo_retrieved_at = None
         if input_label.lower().endswith("live 5-minute data"):
             yahoo_retrieved_at = pd.Timestamp.now(tz=MARKET_TIMEZONE).isoformat()
         summary = run_kronos_forecast(
-            input_path=UPLOADED_DATA_PATH,
+            input_path=uploaded_data_path,
             input_label=input_label,
             forecast_bars=forecast_bars,
             temperature=settings.get("temperature"),
@@ -761,9 +790,10 @@ def run_forecast(
             top_p=settings.get("top_p"),
             sample_count=settings.get("sample_count"),
             yahoo_retrieved_at=yahoo_retrieved_at,
+            output_dir=current_output_dir(),
         )
         summary["cache_hit"] = False
-        SUMMARY_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        output_path("forecast_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         save_forecast_cache(cache_key)
         return build_dashboard_payload(summary, market_data, request_id)
 
@@ -843,12 +873,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PROJECT_ROOT), **kwargs)
 
-    def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def translate_path(self, path: str) -> str:
+        resolved = Path(super().translate_path(path)).resolve()
+        app_root = (PROJECT_ROOT / "app").resolve()
+        try:
+            resolved.relative_to(app_root)
+        except ValueError:
+            return str(app_root / "__not_found__")
+        return str(resolved)
+
+    def send_json(
+        self,
+        payload: dict[str, object],
+        status: HTTPStatus = HTTPStatus.OK,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -857,6 +903,86 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed_path = urlparse(self.path)
+        if parsed_path.path == "/api/auth/session":
+            if not self.is_loopback_client():
+                self.send_json({"error": "Local demo profiles are available only from this computer."}, HTTPStatus.FORBIDDEN)
+                return
+            try:
+                profile = self.current_profile()
+                first_run = not AUTH_STORE.has_profiles()
+            except (OSError, ValueError) as error:
+                self.send_json({"error": f"Local profile storage could not be read: {error}"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self.send_json({
+                "mode": "local-demo",
+                "authenticated": profile is not None,
+                "first_run": first_run,
+                "profile": profile,
+            })
+            return
+
+        if parsed_path.path.startswith("/api/"):
+            if not self.is_loopback_client():
+                self.send_json({"error": "Local demo profiles are available only from this computer."}, HTTPStatus.FORBIDDEN)
+                return
+            try:
+                profile = self.current_profile()
+            except (OSError, ValueError) as error:
+                self.send_json({"error": f"Local profile storage could not be read: {error}"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            if profile is None:
+                self.send_json({"error": "Sign in to local demo mode to continue."}, HTTPStatus.UNAUTHORIZED)
+                return
+            context_token = CURRENT_USER_ID.set(str(profile["id"]))
+            try:
+                if parsed_path.path == "/api/auth/profile":
+                    self.send_json({"profile": profile})
+                    return
+                self.handle_authenticated_get(parsed_path)
+            finally:
+                CURRENT_USER_ID.reset(context_token)
+            return
+
+        if parsed_path.path.startswith("/app/"):
+            super().do_GET()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def is_loopback_client(self) -> bool:
+        return self.client_address[0] in {"127.0.0.1", "::1"}
+
+    def local_origin_is_valid(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        host = self.headers.get("Host", "").lower()
+        return host in {"127.0.0.1:8000", "localhost:8000"} and origin == f"http://{host}"
+
+    def current_profile(self) -> dict[str, object] | None:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return None
+        morsel = cookie.get(SESSION_COOKIE)
+        return AUTH_STORE.restore(morsel.value if morsel else None)
+
+    def read_json_body(self) -> dict[str, object]:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as error:
+            raise ValueError("Request length is invalid.") from error
+        if content_length < 0 or content_length > 32_000:
+            raise ValueError("Profile request is too large.")
+        try:
+            data = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("Request must contain valid JSON.") from error
+        if not isinstance(data, dict):
+            raise ValueError("Request must be a JSON object.")
+        return data
+
+    def handle_authenticated_get(self, parsed_path) -> None:
         if parsed_path.path == "/api/dashboard":
             try:
                 self.send_json(build_dashboard_payload(load_summary()))
@@ -892,9 +1018,77 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except (FileNotFoundError, json.JSONDecodeError) as error:
                 self.send_json({"available": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
-        super().do_GET()
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
+        parsed_path = urlparse(self.path)
+        if not self.is_loopback_client():
+            self.send_json({"error": "Local demo profiles are available only from this computer."}, HTTPStatus.FORBIDDEN)
+            return
+        if not self.local_origin_is_valid():
+            self.send_json({"error": "This local profile request came from an unexpected site."}, HTTPStatus.FORBIDDEN)
+            return
+
+        if parsed_path.path == "/api/auth/sign-in":
+            try:
+                request_data = self.read_json_body()
+                token, profile, first_run = AUTH_STORE.sign_in(
+                    request_data.get("email"), request_data.get("name", "")
+                )
+            except (ValueError, OSError, json.JSONDecodeError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            cookie = (
+                f"{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}; "
+                "HttpOnly; SameSite=Strict"
+            )
+            self.send_json(
+                {"authenticated": True, "first_run": first_run, "mode": "local-demo", "profile": profile},
+                extra_headers={"Set-Cookie": cookie},
+            )
+            return
+
+        if parsed_path.path == "/api/auth/sign-out":
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+                morsel = cookie.get(SESSION_COOKIE)
+                AUTH_STORE.sign_out(morsel.value if morsel else None)
+            except Exception:
+                pass
+            expired_cookie = f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+            self.send_json({"signed_out": True}, extra_headers={"Set-Cookie": expired_cookie})
+            return
+
+        try:
+            profile = self.current_profile()
+        except (OSError, ValueError) as error:
+            self.send_json({"error": f"Local profile storage could not be read: {error}"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if profile is None:
+            self.send_json({"error": "Sign in to local demo mode to continue."}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        context_token = CURRENT_USER_ID.set(str(profile["id"]))
+        try:
+            if parsed_path.path == "/api/auth/profile":
+                try:
+                    request_data = self.read_json_body()
+                    updated_profile = AUTH_STORE.update_profile(
+                        str(profile["id"]),
+                        request_data.get("name"),
+                        request_data.get("preferences"),
+                    )
+                except (ValueError, OSError, json.JSONDecodeError) as error:
+                    self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json({"profile": updated_profile})
+                return
+            self.handle_authenticated_post(parsed_path)
+        finally:
+            CURRENT_USER_ID.reset(context_token)
+
+    def handle_authenticated_post(self, parsed_path) -> None:
         if self.path == "/api/forecast":
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -976,7 +1170,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), DashboardHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 8000), DashboardHandler)
     print("Kronos Copilot dashboard: http://127.0.0.1:8000/app/dashboard.html")
-    print("LAN access: use http://<this-laptop-ip>:8000/app/dashboard.html on the same Wi-Fi")
+    print("Local demo profiles are available only on this computer; no production identity provider is configured.")
     server.serve_forever()
