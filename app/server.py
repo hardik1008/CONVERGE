@@ -419,6 +419,7 @@ def run_validation(
         cached_summary = restore_forecast_cache(cache_key, validation=True)
         if cached_summary:
             return build_dashboard_payload(cached_summary, context, request_id)
+        UPLOADED_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
         UPLOADED_DATA_PATH.write_text(market_data.to_csv(index=False), encoding="utf-8")
         forecast, inference_seconds = predict_with_kronos(
             context,
@@ -746,6 +747,7 @@ def run_forecast(
         cached_summary = restore_forecast_cache(cache_key)
         if cached_summary:
             return build_dashboard_payload(cached_summary, market_data, request_id)
+        UPLOADED_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
         UPLOADED_DATA_PATH.write_text(csv_text, encoding="utf-8")
         yahoo_retrieved_at = None
         if input_label.lower().endswith("live 5-minute data"):
